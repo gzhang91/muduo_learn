@@ -21,7 +21,7 @@ count_down_latch_test: count_down_latch_test.c count_down_latch.c
 thread_test: thread_test.c thread.c
 	gcc -g -o $@ $^ -lpthread
 	
-thread_pool_test: thread_pool_test.c thread_pool.c
+thread_pool_test: thread_pool_test.c thread_pool.c thread.c
 	gcc -g -o $@ $^ -lpthread
 
 thread_local_test: thread_local_test.c thread_local.c
