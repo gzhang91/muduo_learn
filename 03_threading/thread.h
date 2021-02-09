@@ -7,14 +7,12 @@
 	区分线程对象和线程
 */
 
-typedef void *(*thr_func)(void *);
-
 struct thread_s {
 	pthread_t pid;
 	int detach_stat;
 	int ret_stat;
 
-	thr_func fn;
+	void *(*fn)();
 	void *arg;
 };
 
