@@ -1,10 +1,22 @@
 #include "00channel.h"
 #include <unistd.h>
 #include <sys/types.h>
+#define __USE_GNU
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/uio.h>
 #include "00common.h"
 
-#define HAVE_MSGHDR_MSG_CONTROL 1
+#define CREDSTRUCT		ucred
+#define CR_UID				uid
+#define CREDOPT				SO_PASSCRED
+#define SCM_CREDTYPE	SCM_CREDENTIALS
+
+#define RIGHTSLEN CMSG_LEN(sizeof(int))
+#define CREDSLEN	CMSG_LEN(sizeof(struct CREDSTRUCT))
+#define CONTROLLEN (RIGHTSLEN + CREDSLEN)
+
+static struct cmsghdr *cmptr = NULL;
 
 int InitChannel(channel_t *channels, int n) {
 	int i = 0;
@@ -14,7 +26,7 @@ int InitChannel(channel_t *channels, int n) {
 	for (; i < n; ++i) {
 		channels[i].pid = 0;
 
-		ret = pipe(channels[i].fd);
+		ret = socketpair(PF_UNIX, SOCK_DGRAM, 0, channels[i].fd);
 		if (ret < 0 && cnt > 0) { // will try again 3 times
 			i--;
 			cnt--;
@@ -31,94 +43,82 @@ int InitChannel(channel_t *channels, int n) {
 	return 0;
 }
 
-int WriteFd(int fd, void *ptr, size_t nbytes, int sendfd) {
-	struct msghdr   msg;
-	struct iovec    iov[1];
+int SendFd(int fd, int fd_to_send) {
+	struct iovec iov[1]; 
+	struct msghdr msg;  
+	char buff[0];   
 
-#ifdef  HAVE_MSGHDR_MSG_CONTROL
-	union {
-		struct cmsghdr    cm;
-		char              control[CMSG_SPACE(sizeof(int))];
-	} control_un;
-	struct cmsghdr  *cmptr;
+	//指定缓冲区
+	iov[0].iov_base = buff;
+	iov[0].iov_len = 1;
 
-	msg.msg_control = control_un.control;
-	msg.msg_controllen = sizeof(control_un.control);
-
-	cmptr = CMSG_FIRSTHDR(&msg);
-	cmptr->cmsg_len = CMSG_LEN(sizeof(int));
-	cmptr->cmsg_level = SOL_SOCKET;
-	cmptr->cmsg_type = SCM_RIGHTS;
-	*((int *) CMSG_DATA(cmptr)) = sendfd;
-#else
-	msg.msg_accrights = (caddr_t) &sendfd;
-	msg.msg_accrightslen = sizeof(int);
-#endif
-
+	//通过socketpair进行通信，不需要知道ip地址
 	msg.msg_name = NULL;
 	msg.msg_namelen = 0;
 
-	iov[0].iov_base = ptr;
-	iov[0].iov_len = nbytes;
+	//指定内存缓冲区
 	msg.msg_iov = iov;
 	msg.msg_iovlen = 1;
 
-	return (sendmsg(fd, &msg, 0));
+	//辅助数据
+	struct cmsghdr cm;
+	cm.cmsg_len = CMSG_LEN(sizeof(fd)); //描述符的大小
+	cm.cmsg_level = SOL_SOCKET;         //发起协议
+	cm.cmsg_type = SCM_RIGHTS;          //协议类型
+	*(int*)CMSG_DATA(&cm) = fd_to_send; //设置待发送描述符
+
+	//设置辅助数据
+	msg.msg_control = &cm;
+	msg.msg_controllen = CMSG_LEN(sizeof(fd));
+
+	sendmsg(fd, &msg, 0);  //发送描述符
 }
 
-int ReadFd(int fd, void *ptr, size_t nbytes, int *recvfd) {
-    struct msghdr   msg;
-    struct iovec    iov[1];
-    ssize_t         n;
-    int             newfd;
+int SendErr(int fd, int errcode, const char *msg) {
+	int n;
+	if ((n = strlen(msg)) > 0) {
+		if (write(fd, msg, n) != n) {
+			return -1;
+		}
+	}
 
-#ifdef  HAVE_MSGHDR_MSG_CONTROL
-    union {
-      struct cmsghdr    cm;
-      char              control[CMSG_SPACE(sizeof(int))];
-    } control_un;
-    struct cmsghdr  *cmptr;
+	if (errcode >= 0) {
+		errcode = -1;
+	}
 
-    msg.msg_control = control_un.control;
-    msg.msg_controllen = sizeof(control_un.control);
-#else
-    msg.msg_accrights = (caddr_t) &newfd;
-    msg.msg_accrightslen = sizeof(int);
-#endif
+	if (SendFd(fd, errcode) < 0) {
+		return -1;
+	}
 
-    msg.msg_name = NULL;
-    msg.msg_namelen = 0;
+	return 0;
+}
 
-    iov[0].iov_base = ptr;
-    iov[0].iov_len = nbytes;
-    msg.msg_iov = iov;
-    msg.msg_iovlen = 1;
+int RecvFd(int fd) {
+	struct iovec iov[1];  
+	struct msghdr msg;
+	char buff[0];
 
-    if ( (n = recvmsg(fd, &msg, 0)) <= 0)
-        return(n);
+	//指定缓冲区
+	iov[0].iov_base = buff;
+	iov[0].iov_len = 1;
 
-#ifdef  HAVE_MSGHDR_MSG_CONTROL
-    if ( (cmptr = CMSG_FIRSTHDR(&msg)) != NULL &&
-        cmptr->cmsg_len == CMSG_LEN(sizeof(int))) {
-					if (cmptr->cmsg_level != SOL_SOCKET) {
-            PRINT(__FILE__, __LINE__, "control level != SOL_SOCKET");
-						return -1;
-					}
-					if (cmptr->cmsg_type != SCM_RIGHTS) {
-            PRINT(__FILE__, __LINE__, "control type != SCM_RIGHTS");
-						return -1;
-					}
-        *recvfd = *((int *) CMSG_DATA(cmptr));
-    } else
-        *recvfd = -1;       /* descriptor was not passed */
-#else
-/* *INDENT-OFF* */
-    if (msg.msg_accrightslen == sizeof(int))
-        *recvfd = newfd;
-    else
-        *recvfd = -1;       /* descriptor was not passed */
-/* *INDENT-ON* */
-#endif
+	//通过socketpair进行通信，不需要知道ip地址
+	msg.msg_name = NULL;
+	msg.msg_namelen = 0;
 
-    return (n);
+	//指定内存缓冲区
+	msg.msg_iov = iov;
+	msg.msg_iovlen = 1;
+
+	//辅助数据
+	struct cmsghdr cm;
+
+	//设置辅助数据
+	msg.msg_control = &cm;
+	msg.msg_controllen = CMSG_LEN(sizeof(fd));
+
+	recvmsg(fd, &msg, 0);  //接收文件描述符
+
+	int cli_fd = *(int*)CMSG_DATA(&cm);
+	return cli_fd;
 }

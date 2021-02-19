@@ -12,7 +12,7 @@
 		>-1: 代表正常的文件描述符
 */
 struct channel_s {
-	int fd[2];	// 管道
+	int fd[2];	// socket pair
 	pid_t pid;	// 子进程id
 	//int cmd;		// 0-close, 1-io event
 };
@@ -21,9 +21,11 @@ typedef struct channel_s channel_t;
 
 int InitChannel(channel_t *channels, int n);
 
-int WriteFd(int fd, void *ptr, size_t nbytes, int sendfd);
+int SendFd(int fd, int fd_to_send);
 
-int ReadFd(int fd, void *ptr, size_t nbytes, int *recvfd);
+int SendErr(int fd, int errcode, const char *msg);
+
+int RecvFd(int sock_fd);
 
 
 #endif // _CHANNEL_H_
